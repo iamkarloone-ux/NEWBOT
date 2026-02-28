@@ -4,74 +4,48 @@ const stateManager = require('../state_manager');
 const messengerApi = require('../messenger_api');
 const lang = require('../language_manager');
 
-/**
- * FIXED: Removed the unused 'sendText' parameter from the function signature.
- * It now correctly matches the call from index.js: (sender_psid, imageUrl, userLang)
- */
 async function startManualEntryFlow(sender_psid, imageUrl, userLang = 'en') {
-    const replies = [{ title: "⬅️ Back to Menu", payload: "menu" }];
+    const replies = [{ title: "⬅️ Menu", payload: "menu" }];
     await messengerApi.sendQuickReplies(sender_psid, lang.getText('manual_entry_start', userLang), replies);
     stateManager.setUserState(sender_psid, 'awaiting_manual_ref', { imageUrl, lang: userLang });
 }
 
 async function handleManualReference(sender_psid, text, userLang = 'en') {
     const refNumber = text.trim();
-    const replies = [{ title: "⬅️ Back to Menu", payload: "menu" }];
     if (!/^\d{13}$/.test(refNumber)) {
-        await messengerApi.sendQuickReplies(sender_psid, lang.getText('manual_entry_invalid_ref', userLang), replies);
+        await messengerApi.sendQuickReplies(sender_psid, lang.getText('manual_entry_invalid_ref', userLang), [{ title: "⬅️ Menu", payload: "menu" }]);
         return;
     }
     const { imageUrl } = stateManager.getUserState(sender_psid);
     const mods = await db.getMods();
-    if (!mods || mods.length === 0) {
-        await messengerApi.sendQuickReplies(sender_psid, lang.getText('error_no_mods_found', userLang), replies);
-        stateManager.clearUserState(sender_psid);
-        return stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
-    }
     let response = `${lang.getText('manual_entry_thanks', userLang)}\n`;
-    mods.forEach(mod => { response += `🔹 Mod ${mod.id}: ${mod.name}\n   💰 Price: ${mod.price} PHP\n`; });
-    response += `\n${lang.getText('manual_entry_prompt_mod', userLang)}`;
-    await messengerApi.sendQuickReplies(sender_psid, response, replies);
+    mods.forEach(mod => { response += `🔹 Mod ${mod.id}: ${mod.name}\n`; });
+    await messengerApi.sendQuickReplies(sender_psid, response + lang.getText('manual_entry_prompt_mod', userLang), [{ title: "⬅️ Menu", payload: "menu" }]);
     stateManager.setUserState(sender_psid, 'awaiting_manual_mod', { imageUrl, refNumber, lang: userLang });
 }
 
-async function handleManualModSelection(sender_psid, text, sendImage, ADMIN_ID, userLang = 'en') {
+async function handleManualModSelection(sender_psid, text, ADMIN_ID, userLang = 'en') {
     const { imageUrl, refNumber } = stateManager.getUserState(sender_psid);
     const modId = parseInt(text.trim());
     const mod = await db.getModById(modId);
-    if (isNaN(modId) || !mod) {
-        const replies = [{ title: "⬅️ Back to Menu", payload: "menu" }];
-        await messengerApi.sendQuickReplies(sender_psid, lang.getText('manual_entry_invalid_mod', userLang), replies);
-        return;
-    }
+    if (!mod) return messengerApi.sendText(sender_psid, lang.getText('manual_entry_invalid_mod', userLang));
+
     try {
-        const claimsAdded = await db.addReference(refNumber, sender_psid, modId);
-        const claimsText = claimsAdded === 1 ? '1 replacement claim' : `${claimsAdded} replacement claims`;
-        await messengerApi.sendText(sender_psid, lang.getText('manual_entry_success', userLang).replace('{modId}', mod.id).replace('{claimsText}', claimsText));
-        const userName = await messengerApi.getUserProfile(sender_psid);
-        const adminNotification = `⚠️ MANUAL REGISTRATION (AI FAILED) ⚠️\nUser: ${userName}\nRef No: ${refNumber}\nMod: ${mod.name}\nReceipt attached.`;
-        await messengerApi.sendText(ADMIN_ID, adminNotification);
+        await db.addReference(refNumber, sender_psid, modId);
+        await messengerApi.sendText(sender_psid, lang.getText('manual_entry_success', userLang).replace('{modId}', mod.id).replace('{claimsText}', 'replacement claims'));
         
-        // Use the imported sendImage if available, otherwise use messengerApi version
-        if (typeof sendImage === 'function') {
-            await sendImage(ADMIN_ID, imageUrl);
-        } else {
-            await messengerApi.sendImage(ADMIN_ID, imageUrl);
-        }
+        const userName = await messengerApi.getUserProfile(sender_psid);
+        const adminNotification = `⚠️ MANUAL REGISTRATION (AI FAILED) ⚠️\nUser: ${userName}\nRef No: ${refNumber}\nMod: ${mod.name}\nReceipt below:`;
+        
+        // Use messengerApi directly
+        await messengerApi.sendText(ADMIN_ID, adminNotification);
+        await messengerApi.sendImage(ADMIN_ID, imageUrl);
         
     } catch (e) {
-        if (e.message === 'Duplicate reference number') {
-            await messengerApi.sendText(sender_psid, lang.getText('error_duplicate_ref', userLang));
-        } else {
-            throw e;
-        }
+        if (e.message === 'Duplicate reference number') await messengerApi.sendText(sender_psid, lang.getText('error_duplicate_ref', userLang));
     }
     stateManager.clearUserState(sender_psid);
     stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
 }
 
-module.exports = {
-    startManualEntryFlow,
-    handleManualReference,
-    handleManualModSelection,
-};
+module.exports = { startManualEntryFlow, handleManualReference, handleManualModSelection }; 
