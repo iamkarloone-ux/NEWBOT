@@ -117,7 +117,7 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
         const currentStateAfterAnalysis = stateManager.getUserState(sender_psid);
         if (currentStateAfterAnalysis && currentStateAfterAnalysis.state === 'processing_receipt') {
             if (currentStateAfterAnalysis.data?.orderType) { 
-                await userHandler.handleCustomModReceipt(sender_psid, analysis, sendText, sendImage, ADMIN_ID, imageUrl, userLang);
+                await userHandler.handleCustomModReceipt(sender_psid, analysis, ADMIN_ID, imageUrl, userLang);
             } else {
                 await userHandler.handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang);
             }
@@ -286,7 +286,7 @@ async function handleMessage(sender_psid, webhook_event) {
                     case 'awaiting_mod_confirmation': return userHandler.handleModConfirmation(sender_psid, lowerCaseText, ADMIN_ID, userLang);
                     case 'awaiting_mod_clarification': return userHandler.handleModClarification(sender_psid, received_text, ADMIN_ID, userLang);
                     case 'awaiting_manual_ref': return userHandler.handleManualReference(sender_psid, received_text, userLang);
-                    case 'awaiting_manual_mod': return userHandler.handleManualModSelection(sender_psid, received_text, sendImage, ADMIN_ID, userLang);
+                 case 'awaiting_manual_mod': return userHandler.handleManualModSelection(sender_psid, received_text, ADMIN_ID, userLang);
                     case 'awaiting_ref_for_check': return userHandler.processCheckClaims(sender_psid, received_text, userLang);
                     case 'awaiting_ref_for_replacement': return userHandler.processReplacementRequest(sender_psid, received_text, userLang);
                     case 'awaiting_custom_mod_type': return userHandler.handleCustomModType(sender_psid, received_text, userLang);
