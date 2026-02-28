@@ -5,7 +5,11 @@ const secrets = require('./secrets.js');
 const { PAGE_ACCESS_TOKEN } = secrets;
 
 async function sendText(psid, text) {
-    const messageData = { recipient: { id: psid }, message: { text: text }, messaging_type: "RESPONSE" };
+    const messageData = { 
+        recipient: { id: psid }, 
+        message: { text: text }
+        // Removed strict messaging_type to allow admin notifications
+    };
     try {
         await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, messageData);
     } catch (error) {
@@ -16,7 +20,6 @@ async function sendText(psid, text) {
 async function sendQuickReplies(psid, text, replies) {
     const messageData = {
         recipient: { id: psid },
-        messaging_type: "RESPONSE",
         message: {
             text: text,
             quick_replies: replies.map(reply => ({
@@ -36,22 +39,24 @@ async function sendQuickReplies(psid, text, replies) {
 async function sendImage(psid, imageUrl) {
     const messageData = {
         recipient: { id: psid },
-        message: { attachment: { type: "image", payload: { url: imageUrl, is_reusable: false } } },
-        messaging_type: "RESPONSE"
+        message: { 
+            attachment: { 
+                type: "image", 
+                payload: { url: imageUrl, is_reusable: true } 
+            } 
+        }
     };
     try {
         await axios.post(`https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, messageData);
     }
     catch (error) {
-        console.error("Error sending image message:", error.response?.data || error.message);
+        console.error("Error sending image message to Admin:", error.response?.data || error.message);
     }
 }
 
 const userProfileCache = new Map();
 async function getUserProfile(psid) {
-    if (userProfileCache.has(psid)) {
-        return userProfileCache.get(psid);
-    }
+    if (userProfileCache.has(psid)) return userProfileCache.get(psid);
     try {
         const url = `https://graph.facebook.com/v19.0/${psid}?fields=first_name,last_name&access_token=${PAGE_ACCESS_TOKEN}`;
         const response = await axios.get(url);
@@ -61,16 +66,9 @@ async function getUserProfile(psid) {
             return fullName;
         }
     } catch (error) {
-        console.error(`Failed to fetch user profile for ${psid}:`, error.response?.data || error.message);
         return psid;
     }
     return psid;
 }
 
-module.exports = {
-    sendText,
-    sendImage,
-    getUserProfile,
-    sendQuickReplies
-}; 
- 
+module.exports = { sendText, sendImage, getUserProfile, sendQuickReplies }; 
