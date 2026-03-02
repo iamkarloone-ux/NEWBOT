@@ -1,17 +1,15 @@
-// payment_verifier.js (Updated for Render Environment Variables)
+// payment_verifier.js (Optimized for Render & Production)
 const axios = require('axios');
 const sharp = require('sharp');
 
-// Get API key from environment variable (set in Render dashboard)
+// 1. Get API key from environment variable
 const API_KEY = process.env.GEMINI_API_KEY;
 
-// Validate API key exists
 if (!API_KEY) {
     console.error("❌ CRITICAL: GEMINI_API_KEY environment variable is not set!");
-    console.error("Please add GEMINI_API_KEY to your Render environment variables.");
 }
 
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${API_KEY}`;
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`;
 
 const ANALYSIS_PROMPT = `
 ACT AS A GCASH RECEIPT SCANNER.
@@ -22,16 +20,19 @@ YOU MUST REPLY ONLY WITH A JSON OBJECT. NO TEXT.
 {
     "extracted_info": {
         "reference_number": "13DIGITS_ONLY_NO_SPACES",
-        "amount": "NUMBER_ONLY"
+        "amount": "NUMBER_ONLY_NO_COMMAS"
     },
     "verification_status": "APPROVED",
     "reasoning": "OCR result"
 }`;
 
+/**
+ * Pre-processes the image to improve OCR accuracy
+ */
 async function encodeImage(imageBuffer) {
     try {
         const processed = await sharp(imageBuffer)
-            .resize({ width: 1200 }) 
+            .resize({ width: 1200 }) // Standardize size
             .sharpen() 
             .toFormat('jpeg', { quality: 90 })
             .toBuffer();
@@ -42,20 +43,29 @@ async function encodeImage(imageBuffer) {
     }
 }
 
+/**
+ * Cleans the AI response to ensure valid JSON and formatting
+ */
 function cleanAndParseJSON(text) {
     try {
-        // Remove markdown code blocks if present
-        let cleanText = text.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+        // Remove markdown formatting if the AI accidentally includes it
+        let cleanText = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
 
         const jsonMatch = cleanText.match(/({[\s\S]*})/);
         if (!jsonMatch) return null;
 
         const parsed = JSON.parse(jsonMatch[0]);
 
+        // Clean Reference Number (Digits only)
         if (parsed.extracted_info?.reference_number) {
-            // Forcefully remove all non-digit characters
             parsed.extracted_info.reference_number = String(parsed.extracted_info.reference_number).replace(/\D/g, "");
         }
+
+        // Clean Amount (Remove commas, ensure it's a string/number)
+        if (parsed.extracted_info?.amount) {
+            parsed.extracted_info.amount = String(parsed.extracted_info.amount).replace(/,/g, "");
+        }
+
         return parsed;
     } catch (e) { 
         console.error("JSON parsing error:", e.message);
@@ -63,14 +73,15 @@ function cleanAndParseJSON(text) {
     }
 }
 
+/**
+ * Sends image to Gemini for analysis
+ */
 async function analyzeReceiptWithFallback(imageUrl, image_b64) {
-    // Check if API key is configured
     if (!API_KEY) {
-        console.error("Cannot analyze receipt: GEMINI_API_KEY not configured");
         return { 
-            extracted_info: { reference_number: "API_KEY_MISSING", amount: "0" }, 
+            extracted_info: { reference_number: "ERROR", amount: "0" }, 
             verification_status: "REJECTED",
-            reasoning: "API key not configured"
+            reasoning: "API key missing in environment variables"
         };
     }
 
@@ -82,78 +93,34 @@ async function analyzeReceiptWithFallback(imageUrl, image_b64) {
             ] 
         }],
         generationConfig: { 
-            temperature: 0.1,  // Slightly higher for flexibility
+            temperature: 0.1, // Keep it precise
             response_mime_type: "application/json"
         }
     };
 
     try {
-        console.log("📤 Sending request to Gemini API...");
-
         const response = await axios.post(API_URL, payload, { 
             headers: { "Content-Type": "application/json" }, 
-            timeout: 35000 
+            timeout: 30000 
         });
 
         const aiText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-        console.log("📥 Raw AI Response:", aiText);
-
         if (!aiText) {
-            console.error("Empty response from Gemini API");
-            return { 
-                extracted_info: { reference_number: "Not Found" }, 
-                verification_status: "REJECTED",
-                reasoning: "Empty API response"
-            };
+            throw new Error("Empty response from Gemini");
         }
 
         const parsed = cleanAndParseJSON(aiText);
-
-        if (!parsed) {
-            console.error("Failed to parse AI response as JSON");
-            return { 
-                extracted_info: { reference_number: "Parse Error" }, 
-                verification_status: "REJECTED",
-                reasoning: "JSON parse failed"
-            };
-        }
-
-        return parsed;
+        return parsed || { verification_status: "REJECTED", reasoning: "Could not parse receipt data" };
 
     } catch (error) {
         console.error("❌ Gemini API Error:", error.response?.data || error.message);
         return { 
             extracted_info: { reference_number: "Not Found" }, 
             verification_status: "REJECTED",
-            reasoning: `API Error: ${error.message}`
+            reasoning: `AI Error: ${error.message}`
         };
     }
 }
 
-module.exports = { encodeImage, analyzeReceiptWithFallback };    try {
-        const jsonMatch = text.match(/({[\s\S]*})/);
-        if (!jsonMatch) return null;
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.extracted_info?.reference_number) {
-            // Forcefully remove spaces: "123 456..." -> "123456..."
-            parsed.extracted_info.reference_number = String(parsed.extracted_info.reference_number).replace(/\D/g, "");
-        }
-        return parsed;
-    } catch (e) { return null; }
-}
-
-async function analyzeReceiptWithFallback(imageUrl, image_b64) {
-    const payload = {
-        contents: [{ parts: [{ text: ANALYSIS_PROMPT }, { inline_data: { mime_type: "image/jpeg", data: image_b64 } }] }],
-        generationConfig: { temperature: 0, response_mime_type: "application/json" }
-    };
-    try {
-        const response = await axios.post(API_URL, payload, { headers: { "Content-Type": "application/json" }, timeout: 35000 });
-        const aiText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        return aiText ? cleanAndParseJSON(aiText) : null;
-    } catch (error) {
-        return { extracted_info: { reference_number: "Not Found" }, verification_status: "REJECTED" };
-    }
-}
 module.exports = { encodeImage, analyzeReceiptWithFallback };
