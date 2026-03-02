@@ -4,7 +4,7 @@ const sharp = require('sharp');
 const secrets = require('./secrets.js');
 
 const API_KEY = secrets.GEMINI_API_KEY;
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`;
 
 const ANALYSIS_PROMPT = `
 ACT AS A GCASH RECEIPT SCANNER.
