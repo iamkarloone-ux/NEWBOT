@@ -90,30 +90,33 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
     const userLang = userState?.lang || 'en';
     await sendText(sender_psid, lang.getText('receipt_analyzing', userLang));
 
-    console.log(`[RECEIPT-STEP 1] Received image for analysis. URL: ${imageUrl}`);
+    console.log(`[RECEIPT] Analyzing image via External API. URL: ${imageUrl}`);
 
     try {
+        // 1. We still download the image because we want to save it locally for the Admin/Records
         const imageResponse = await require('axios')({ url: imageUrl, responseType: 'arraybuffer' });
         const imageBuffer = Buffer.from(imageResponse.data, 'binary');
-
-        console.log(`[RECEIPT-STEP 2] Successfully downloaded image. Buffer size: ${imageBuffer.length} bytes.`);
-
+        
+        // 2. We still encode it, just in case the External API fails and we need a local fallback
         const image_b64 = await paymentVerifier.encodeImage(imageBuffer);
-        if (!image_b64) throw new Error("Failed to encode image.");
 
-        console.log(`[RECEIPT-STEP 3] Image encoded. Calling AI for analysis...`);
-
+        // 3. CALL THE NEW API (Passed the URL directly)
+        // This calls the function we created in the new payment_verifier.js
         const analysis = await paymentVerifier.analyzeReceiptWithFallback(imageUrl, image_b64);
 
-        console.log(`[RECEIPT-STEP 6] Received analysis from AI:`, JSON.stringify(analysis, null, 2));
+        console.log(`[RECEIPT] Analysis Result:`, JSON.stringify(analysis, null, 2));
 
-        if (!analysis) throw new Error("AI analysis returned null.");
+        if (!analysis || analysis.verification_status === "REJECTED") {
+            throw new Error(analysis?.reasoning || "Could not read receipt");
+        }
 
+        // 4. SAVE THE IMAGE LOCALLY (So the admin can see it later)
         const receiptsDir = path.join(__dirname, 'receipts');
         if (!fs.existsSync(receiptsDir)) { fs.mkdirSync(receiptsDir); }
         const imagePath = path.join(receiptsDir, `${sender_psid}_${Date.now()}.png`);
         fs.writeFileSync(imagePath, imageBuffer);
 
+        // 5. PROCEED TO DATABASE/USER HANDLER
         const currentStateAfterAnalysis = stateManager.getUserState(sender_psid);
         if (currentStateAfterAnalysis && currentStateAfterAnalysis.state === 'processing_receipt') {
             if (currentStateAfterAnalysis.data?.orderType) { 
@@ -121,16 +124,14 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
             } else {
                 await userHandler.handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang);
             }
-        } else {
-            console.warn(`[WARN] Receipt analysis for ${sender_psid} finished, but state was no longer 'processing_receipt'. State is now: ${currentStateAfterAnalysis?.state}. Aborting post-analysis actions.`);
         }
 
     } catch (error) {
-        console.error(`--- CRITICAL FAILURE IN handleReceiptSubmission ---`, error);
+        console.error(`--- RECEIPT SCANNING FAILED ---`, error.message);
 
         const currentState = stateManager.getUserState(sender_psid);
         if (currentState && currentState.state === 'processing_receipt') {
-            // FIXED: Passing correct arguments to Manual Entry
+            // If the AI fails, we trigger Manual Entry so the user doesn't get stuck
             await userHandler.startManualEntryFlow(sender_psid, imageUrl, userLang);
         } else {
             await handleError(error, sender_psid, 'Receipt Submission');
