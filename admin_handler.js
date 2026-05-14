@@ -1,6 +1,7 @@
 // admin_handler.js (FINAL, COMPLETE, AND CORRECTLY FORMATTED)
 const db = require('./database');
 const stateManager = require('./state_manager');
+const crypto = require('crypto'); // <-- ADDED: Built-in Node module for generating random Device IDs
 
 function generatePassword(length = 10) {
     const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -98,10 +99,12 @@ async function promptForAdminCreate_Step2_GetMod(sender_psid, text, sendText) {
     stateManager.setUserState(sender_psid, 'awaiting_admin_create_mod_id', { email });
 }
 
+// --- ADDED CARX API REGISTRATION LOGIC HERE ---
 async function processAdminCreate_Step3_CreateJob(sender_psid, text, sendText) {
     const modId = parseInt(text.trim());
     const { email } = stateManager.getUserState(sender_psid);
     const mod = await db.getModById(modId);
+    
     if (isNaN(modId) || !mod) {
         await sendText(sender_psid, "❌ Invalid Mod ID. Please reply with a valid number from the list or type 'Menu' to cancel.");
         return;
@@ -111,14 +114,47 @@ async function processAdminCreate_Step3_CreateJob(sender_psid, text, sendText) {
         stateManager.clearUserState(sender_psid);
         return;
     }
+    
     try {
         const password = generatePassword();
-        // FIXED: Added 'en' as default language parameter
+        await sendText(sender_psid, `⏳ Contacting CarX Servers to register account instantly...`);
+
+        // Generate a Random Hex ID (equivalent to uuid.uuid4().hex in Python)
+        const randomId = crypto.randomUUID().replace(/-/g, '');
+        
+        const payload = {
+            project: "STREET",
+            username: email,
+            email: email,
+            password: password,
+            deviceId: randomId,
+            deviceUniqueId: randomId
+        };
+
+        // Make the API call to CarX
+        const apiResponse = await fetch("https://carx-id-prod.carx-online.com/api/auth/register", {
+            method: "POST",
+            headers: {
+                "User-Agent": "CarX/1.18.0 (Android; Unity)",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!apiResponse.ok) {
+            const errorText = await apiResponse.text();
+            throw new Error(`CarX Server rejected registration (${apiResponse.status}): ${errorText}`);
+        }
+
+        // Account successfully created on CarX! Now queue it for the phone worker.
         const jobId = await db.createAccountCreationJob(sender_psid, email, password, modId, 'en');
-        await sendText(sender_psid, `✅ Success! Automation job (ID: ${jobId}) has been started for ${email}.\n\nThe account details will be sent to you here once the worker has finished.`);
+        
+        await sendText(sender_psid, `✅ API Registration Success!\n📱 Sent job to Worker Phone to sign in and inject Mod ${modId}.\n\nJob ID: ${jobId}\nDetails will be sent here when the phone finishes.`);
+        
     } catch (e) {
         console.error("Error creating admin job:", e);
-        await sendText(sender_psid, `An unexpected error occurred: ${e.message}`);
+        await sendText(sender_psid, `❌ An unexpected error occurred: ${e.message}`);
     } finally {
         stateManager.clearUserState(sender_psid);
     }
