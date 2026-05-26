@@ -1,4 +1,4 @@
-// database.js (COMPLETE FULL-LENGTH VERSION)
+// database.js (COMPLETE UPDATED FULL-LENGTH VERSION)
 const { Pool } = require('pg');
 const secrets = require('./secrets.js');
 
@@ -30,22 +30,26 @@ async function setupDatabase() {
         
         // 1. Core Tables
         await client.query(`CREATE TABLE IF NOT EXISTS admins (user_id TEXT PRIMARY KEY, gcash_number TEXT, is_online BOOLEAN DEFAULT FALSE)`);
-        await client.query(`CREATE TABLE IF NOT EXISTS mods (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT, price REAL DEFAULT 0, image_url TEXT, default_claims_max INTEGER DEFAULT 3, x_coordinate REAL, y_coordinate REAL)`);
+        await client.query(`CREATE TABLE IF NOT EXISTS mods (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT, price REAL DEFAULT 0, image_url TEXT, default_claims_max INTEGER DEFAULT 3, x_coordinate REAL, y_coordinate REAL, template_name TEXT)`);
         await client.query(`CREATE TABLE IF NOT EXISTS accounts (id SERIAL PRIMARY KEY, mod_id INTEGER NOT NULL, username TEXT NOT NULL, password TEXT NOT NULL, is_available BOOLEAN DEFAULT TRUE, FOREIGN KEY (mod_id) REFERENCES mods(id))`);
         await client.query(`CREATE TABLE IF NOT EXISTS "references" (ref_number TEXT PRIMARY KEY, user_id TEXT NOT NULL, mod_id INTEGER NOT NULL, timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, claims_used INTEGER DEFAULT 0, claims_max INTEGER DEFAULT 1, last_replacement_timestamp TIMESTAMPTZ, FOREIGN KEY (mod_id) REFERENCES mods(id))`);
         await client.query(`CREATE TABLE IF NOT EXISTS creation_jobs ( job_id SERIAL PRIMARY KEY, user_psid TEXT NOT NULL, email TEXT NOT NULL, password TEXT NOT NULL, mod_id INTEGER NOT NULL, status VARCHAR(20) DEFAULT 'pending', result_message TEXT, created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP )`);
         
-        // 2. Settings & Users
+        // 2. Settings, Users & Profile Sets
         await client.query(`CREATE TABLE IF NOT EXISTS paused_users (user_id TEXT PRIMARY KEY)`);
         await client.query(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`);
         await client.query(`INSERT INTO app_settings (key, value) VALUES ('maintenance_mode', 'false') ON CONFLICT (key) DO NOTHING`);
         await client.query(`CREATE TABLE IF NOT EXISTS users (psid TEXT PRIMARY KEY, lang TEXT DEFAULT 'en')`);
+        
+        // NEW: Profile sets table to store captured account backups
+        await client.query(`CREATE TABLE IF NOT EXISTS profile_templates (name TEXT PRIMARY KEY, data JSONB, created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
         
         await client.query('COMMIT');
 
         // 3. Ensure columns exist (for older database versions)
         try { await client.query('ALTER TABLE admins ADD COLUMN is_online BOOLEAN DEFAULT FALSE'); } catch (e) {}
         try { await client.query('ALTER TABLE mods ADD COLUMN x_coordinate REAL'); await client.query('ALTER TABLE mods ADD COLUMN y_coordinate REAL'); } catch (e) {}
+        try { await client.query('ALTER TABLE mods ADD COLUMN template_name TEXT'); } catch (e) {} // Sync linked template field
         try { await client.query('ALTER TABLE "references" ADD COLUMN last_replacement_timestamp TIMESTAMPTZ'); } catch (e) {}
         try { await client.query('ALTER TABLE users ADD COLUMN lang TEXT DEFAULT \'en\''); } catch (e) {}
         
@@ -83,19 +87,16 @@ async function getPendingJobsForWorker() {
 }
 
 async function getActionableJobs() {
-    // Used by job_poller.js to find jobs that need a message sent to the user
     const res = await getDb().query("SELECT * FROM creation_jobs WHERE status IN ('completed', 'failed')");
     return res.rows;
 }
 
 async function getStalePendingJobs(minutes) {
-    // Alerts admin if worker is offline
     const res = await getDb().query(`SELECT * FROM creation_jobs WHERE status = 'pending' AND created_at < NOW() - INTERVAL '${minutes} minutes'`);
     return res.rows;
 }
 
 async function getCreationJobs() {
-    // Admin View
     const res = await getDb().query('SELECT job_id, user_psid, status, result_message FROM creation_jobs ORDER BY created_at DESC LIMIT 15');
     return res.rows;
 }
@@ -129,11 +130,28 @@ async function setMaintenanceStatus(isMaintenance) {
     await getDb().query("UPDATE app_settings SET value = $1 WHERE key = 'maintenance_mode'", [isMaintenance]);
 }
 
+// --- PROFILE SETS / TEMPLATES MANAGER ---
+
+async function saveProfileTemplate(name, data) {
+    const query = 'INSERT INTO profile_templates (name, data) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET data = EXCLUDED.data';
+    await getDb().query(query, [name, JSON.stringify(data)]);
+}
+
+async function getProfileTemplates() {
+    const res = await getDb().query('SELECT name, created_at FROM profile_templates ORDER BY created_at DESC');
+    return res.rows;
+}
+
+async function getTemplateByName(name) {
+    const res = await getDb().query('SELECT data FROM profile_templates WHERE name = $1', [name]);
+    return res.rows[0]?.data || null;
+}
+
 // --- MOD & INVENTORY MANAGEMENT ---
 
 async function getMods() {
     const query = `
-        SELECT m.id, m.name, m.description, m.price, m.image_url, m.default_claims_max, 
+        SELECT m.id, m.name, m.description, m.price, m.image_url, m.default_claims_max, m.template_name,
         (SELECT COUNT(*) FROM accounts WHERE mod_id = m.id AND is_available = TRUE) as stock 
         FROM mods m ORDER BY m.id`;
     const res = await getDb().query(query);
@@ -229,7 +247,7 @@ async function deleteAccountsByModId(modId) {
 // --- USER MANAGEMENT ---
 
 async function addUser(psid, lang = 'en') {
-    await getDb().query('INSERT INTO users (psid, lang) VALUES ($1, $2) ON CONFLICT (psid) DO UPDATE SET lang = EXCLUDED.lang', [psid, lang]);
+    getDb().query('INSERT INTO users (psid, lang) VALUES ($1, $2) ON CONFLICT (psid) DO UPDATE SET lang = EXCLUDED.lang', [psid, lang]);
 }
 
 async function getUser(psid) {
@@ -309,5 +327,9 @@ module.exports = {
     isUserPaused,
     pauseUser,
     resumeUser,
-    getSalesStatistics
-}; 
+    getSalesStatistics,
+    // New Profile Sets Helpers
+    saveProfileTemplate,
+    getProfileTemplates,
+    getTemplateByName
+};
