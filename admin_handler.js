@@ -1,7 +1,8 @@
 // admin_handler.js (FINAL, COMPLETE, AND CORRECTLY FORMATTED)
 const db = require('./database');
 const stateManager = require('./state_manager');
-const crypto = require('crypto'); // <-- ADDED: Built-in Node module for generating random Device IDs
+const crypto = require('crypto'); // node module for generating random Device IDs
+const carxApi = require('./carx_api'); // Direct CarX API Engine
 
 function generatePassword(length = 10) {
     const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -33,7 +34,7 @@ Type 8: 🗑️ Delete a reference number
 Type 9: Toggle Online/Offline Status (Currently: ${onlineStatus})
 Type 10: 💬 Reply to a user with account details
 Type 11: 🤖 View account creation jobs
-Type 12: ⚡ Create account for user (Admin)
+Type 12: ⚡ Create account for user (Instant API)
 Type 13: ➕ Add bulk reference numbers
 Type 14: ⏸️ Pause/Resume bot for a user
 Type 15: 🔧 Toggle Maintenance Mode (Currently: ${maintenanceStatus})
@@ -41,6 +42,8 @@ Type 16: 🗑️ Delete accounts for a mod
 Type 17: 📢 Broadcast a message
 Type 18: ✍️ Edit reference claims
 Type 19: 📊 View Sales Statistics
+Type 20: 📸 Capture & Save Profile Template
+Type 21: 📁 View Saved Profile Sets
 `;
     await sendText(sender_psid, menu);
     stateManager.clearUserState(sender_psid);
@@ -99,58 +102,31 @@ async function promptForAdminCreate_Step2_GetMod(sender_psid, text, sendText) {
     stateManager.setUserState(sender_psid, 'awaiting_admin_create_mod_id', { email });
 }
 
-// --- ADDED CARX API REGISTRATION LOGIC HERE ---
+// --- INSTANT ACCOUNT CREATION (REPLACES JOB QUEUE) ---
 async function processAdminCreate_Step3_CreateJob(sender_psid, text, sendText) {
     const modId = parseInt(text.trim());
-    const { email } = stateManager.getUserState(sender_psid);
+    const state = stateManager.getUserState(sender_psid);
     const mod = await db.getModById(modId);
     
     if (isNaN(modId) || !mod) {
         await sendText(sender_psid, "❌ Invalid Mod ID. Please reply with a valid number from the list or type 'Menu' to cancel.");
         return;
     }
-    if (!mod.x_coordinate || !mod.y_coordinate) {
-        await sendText(sender_psid, `❌ This mod (ID: ${modId}) cannot be automated because its coordinates are not set. Please edit the mod to add coordinates first.`);
-        stateManager.clearUserState(sender_psid);
-        return;
-    }
     
     try {
         const password = generatePassword();
-        await sendText(sender_psid, `⏳ Contacting CarX Servers to register account instantly...`);
+        await sendText(sender_psid, `⏳ Contacting CarX Servers to register and inject account instantly...`);
 
-        // Generate a Random Hex ID (equivalent to uuid.uuid4().hex in Python)
-        const randomId = crypto.randomUUID().replace(/-/g, '');
-        
-        const payload = {
-            project: "STREET",
-            username: email,
-            email: email,
-            password: password,
-            deviceId: randomId,
-            deviceUniqueId: randomId
-        };
+        // Pull template from database
+        const template = await db.getTemplateByName(mod.template_name || "Set1");
+        if (!template) throw new Error("No profile template found in database. Use Type 20 to capture one first.");
 
-        // Make the API call to CarX
-        const apiResponse = await fetch("https://carx-id-prod.carx-online.com/api/auth/register", {
-            method: "POST",
-            headers: {
-                "User-Agent": "CarX/1.18.0 (Android; Unity)",
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            },
-            body: JSON.stringify(payload)
-        });
+        // Direct API injection
+        const result = await carxApi.createAndInject(state.email, password, template);
 
-        if (!apiResponse.ok) {
-            const errorText = await apiResponse.text();
-            throw new Error(`CarX Server rejected registration (${apiResponse.status}): ${errorText}`);
+        if (result) {
+            await sendText(sender_psid, `✅ API Registration & Injection Success!\n\n📧 Email: \`${state.email}\`\n🔐 Password: \`${password}\`\n🆔 CarX ID: \`${result.carxId}\``);
         }
-
-        // Account successfully created on CarX! Now queue it for the phone worker.
-        const jobId = await db.createAccountCreationJob(sender_psid, email, password, modId, 'en');
-        
-        await sendText(sender_psid, `✅ API Registration Success!\n📱 Sent job to Worker Phone to sign in and inject Mod ${modId}.\n\nJob ID: ${jobId}\nDetails will be sent here when the phone finishes.`);
         
     } catch (e) {
         console.error("Error creating admin job:", e);
@@ -774,6 +750,54 @@ async function processSalesStats(sender_psid, text, sendText) {
     }
 }
 
+// --- TYPE 20: PROFILE CAPTURE (NEW) ---
+
+async function promptForCapture_Step1_GetInfo(sender_psid, sendText) {
+    await sendText(sender_psid, "📸 Profile Capture Mode\n\nPlease enter the credentials of the account to capture in this format:\n\nemail, password, deviceId, carxId, SaveName");
+    stateManager.setUserState(sender_psid, 'awaiting_capture_info');
+}
+
+async function processCapture_Step2_Execute(sender_psid, text, sendText) {
+    const parts = text.split(',').map(item => item.trim());
+    if (parts.length < 5) {
+        await sendText(sender_psid, "❌ Invalid format. Please use: email, password, deviceId, carxId, SaveName");
+        return;
+    }
+    try {
+        await sendText(sender_psid, "⏳ Connecting to CarX servers to download and decrypt profile...");
+        const profileData = await carxApi.fetchExistingProfile(parts[0], parts[1], parts[2], parts[3]);
+        if (profileData) {
+            await db.saveProfileTemplate(parts[4], profileData);
+            await sendText(sender_psid, `✅ Success! Profile captured and saved as "${parts[4]}" in the database.`);
+        } else {
+            await sendText(sender_psid, "❌ Failed to download or decrypt profile data.");
+        }
+    } catch (e) {
+        await sendText(sender_psid, `❌ Error during capture: ${e.message}`);
+    } finally {
+        stateManager.clearUserState(sender_psid);
+    }
+}
+
+// --- TYPE 21: VIEW TEMPLATES (NEW) ---
+
+async function handleViewTemplates(sender_psid, sendText) {
+    try {
+        const templates = await db.getProfileTemplates();
+        if (!templates || templates.length === 0) {
+            return sendText(sender_psid, "No saved profile templates found in database.");
+        }
+        let msg = "📂 Saved Profile Templates:\n\n";
+        templates.forEach((t, i) => {
+            msg += `${i + 1}. ${t.name} (Saved: ${new Date(t.created_at).toLocaleDateString()})\n`;
+        });
+        await sendText(sender_psid, msg);
+    } catch (e) {
+        await sendText(sender_psid, `❌ Error: ${e.message}`);
+    }
+    stateManager.clearUserState(sender_psid);
+}
+
 module.exports = {
     showAdminMenu,
     handleViewReferences,
@@ -820,5 +844,8 @@ module.exports = {
     promptForEditClaims_Step2_GetNewClaims,
     processEditClaims_Step3_Update,
     promptForSalesStats,
-    processSalesStats
+    processSalesStats,
+    promptForCapture_Step1_GetInfo,
+    processCapture_Step2_Execute,
+    handleViewTemplates
 };
