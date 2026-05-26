@@ -1,4 +1,4 @@
-// index.js (Final Corrected Version with All Fixes)
+// index.js (FINAL, COMPLETE, AND CORRECTLY FORMATTED)
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -11,60 +11,9 @@ const paymentVerifier = require('./payment_verifier.js');
 const { sendText, sendImage, sendQuickReplies, getUserProfile } = require('./messenger_api.js');
 const lang = require('./language_manager');
 
-// NEW: Import the job poller
-const jobPoller = require('./job_poller.js');
-
 const app = express();
 app.use(express.json());
-const { VERIFY_TOKEN, ADMIN_ID, WORKER_SECRET_TOKEN } = secrets;
-
-app.post('/webhook-delivery', async (req, res) => {
-    try {
-        const authHeader = req.headers.authorization;
-        const token = authHeader && authHeader.split(' ')[1];
-        if (token !== WORKER_SECRET_TOKEN) {
-            console.warn("Unauthorized delivery attempt received.");
-            return res.status(403).send('Forbidden');
-        }
-        const { job_id, username, password } = req.body;
-        if (!job_id || !username || !password) {
-            console.error("Invalid delivery payload received:", req.body);
-            return res.status(400).send('Bad Request: Missing required fields.');
-        }
-
-        const job = await dbManager.getJobById(job_id);
-        if (!job) {
-            console.error(`Delivery received for a non-existent Job ID: ${job_id}`);
-            return res.status(404).send('Job Not Found');
-        }
-
-        // FIXED: Using the lang column we added to the database
-        const deliveryLang = job.lang || 'en';
-        const userMessage = lang.getText('delivery_success', deliveryLang) + `\n\n📧 Username: \`${username}\`\n🔐 Password: \`${password}\`\n\nThank you for your trust! Enjoy! 💙`;
-        
-        try {
-            await sendText(job.user_psid, userMessage);
-            await dbManager.updateJobStatus(job_id, 'delivered', 'Successfully delivered to user.');
-            console.log(`Successfully delivered credentials for Job ID: ${job_id} to user ${job.user_psid}`);
-        
-        } catch (deliveryError) {
-            console.error(`--- FAILED TO DELIVER MESSAGE for Job ID: ${job_id} to user ${job.user_psid} ---`);
-            console.error(deliveryError.message);
-            
-            const resultMsg = `Account created successfully, but delivery failed. User may have blocked the page. Credentials: ${username}:${password}`;
-            await dbManager.updateJobStatus(job_id, 'delivery_failed', resultMsg);
-            
-            await sendText(ADMIN_ID, `🚨 DELIVERY FAILED! 🚨\nJob ID ${job_id} for user ${job.user_psid} was created but could not be delivered. The user may have blocked the page.\n\nAccount Details:\nUsername: ${username}\nPassword: ${password}`);
-        }
-
-        res.status(200).send('OK');
-
-    } catch (error) {
-        console.error("--- CRITICAL ERROR in /webhook-delivery ---", error);
-        res.status(500).send('Internal Server Error');
-    }
-});
-
+const { VERIFY_TOKEN, ADMIN_ID } = secrets;
 
 async function handleError(error, sender_psid, context = 'Unknown') {
     console.error(`--- ERROR ---`);
@@ -73,7 +22,6 @@ async function handleError(error, sender_psid, context = 'Unknown') {
     console.error(error);
     console.error(`--- END ERROR ---`);
     try {
-        // FIXED: Using dbManager.getUser which we just added to database.js
         const user = await dbManager.getUser(sender_psid);
         const userLang = user?.lang || 'en';
         const userName = await getUserProfile(sender_psid);
@@ -93,15 +41,14 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
     console.log(`[RECEIPT] Analyzing image via External API. URL: ${imageUrl}`);
 
     try {
-        // 1. We still download the image because we want to save it locally for the Admin/Records
+        // 1. Download image for storage
         const imageResponse = await require('axios')({ url: imageUrl, responseType: 'arraybuffer' });
         const imageBuffer = Buffer.from(imageResponse.data, 'binary');
         
-        // 2. We still encode it, just in case the External API fails and we need a local fallback
+        // 2. Encode image as fallback
         const image_b64 = await paymentVerifier.encodeImage(imageBuffer);
 
-        // 3. CALL THE NEW API (Passed the URL directly)
-        // This calls the function we created in the new payment_verifier.js
+        // 3. Call OCR Receipt Analyzer API
         const analysis = await paymentVerifier.analyzeReceiptWithFallback(imageUrl, image_b64);
 
         console.log(`[RECEIPT] Analysis Result:`, JSON.stringify(analysis, null, 2));
@@ -110,13 +57,13 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
             throw new Error(analysis?.reasoning || "Could not read receipt");
         }
 
-        // 4. SAVE THE IMAGE LOCALLY (So the admin can see it later)
+        // 4. Save image locally
         const receiptsDir = path.join(__dirname, 'receipts');
         if (!fs.existsSync(receiptsDir)) { fs.mkdirSync(receiptsDir); }
         const imagePath = path.join(receiptsDir, `${sender_psid}_${Date.now()}.png`);
         fs.writeFileSync(imagePath, imageBuffer);
 
-        // 5. PROCEED TO DATABASE/USER HANDLER
+        // 5. Handover to flow handlers
         const currentStateAfterAnalysis = stateManager.getUserState(sender_psid);
         if (currentStateAfterAnalysis && currentStateAfterAnalysis.state === 'processing_receipt') {
             if (currentStateAfterAnalysis.data?.orderType) { 
@@ -131,7 +78,6 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
 
         const currentState = stateManager.getUserState(sender_psid);
         if (currentState && currentState.state === 'processing_receipt') {
-            // If the AI fails, we trigger Manual Entry so the user doesn't get stuck
             await userHandler.startManualEntryFlow(sender_psid, imageUrl, userLang);
         } else {
             await handleError(error, sender_psid, 'Receipt Submission');
@@ -140,7 +86,7 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
 }
 
 async function handleMessage(sender_psid, webhook_event) {
-    console.log(`[GLOBAL-LOG] Message received from: ${sender_psid}`); // ADD THIS
+    console.log(`[GLOBAL-LOG] Message received from: ${sender_psid}`);
     try {
         const message = webhook_event.message;
         let received_text = null;
@@ -195,6 +141,7 @@ async function handleMessage(sender_psid, webhook_event) {
                     case 'awaiting_edit_claims_ref': return adminHandler.promptForEditClaims_Step2_GetNewClaims(sender_psid, received_text, sendText);
                     case 'awaiting_edit_claims_values': return adminHandler.processEditClaims_Step3_Update(sender_psid, received_text, sendText);
                     case 'awaiting_sales_stats_period': return adminHandler.processSalesStats(sender_psid, received_text, sendText);
+                    case 'awaiting_capture_info': return adminHandler.processCapture_Step2_Execute(sender_psid, received_text, sendText);
                 }
             } else {
                 switch (lowerCaseText) {
@@ -217,6 +164,8 @@ async function handleMessage(sender_psid, webhook_event) {
                     case '17': return adminHandler.promptForBroadcast_Step1_GetMessage(sender_psid, sendText);
                     case '18': return adminHandler.promptForEditClaims_Step1_GetRef(sender_psid, sendText);
                     case '19': return adminHandler.promptForSalesStats(sender_psid, sendText);
+                    case '20': return adminHandler.promptForCapture_Step1_GetInfo(sender_psid, sendText);
+                    case '21': return adminHandler.handleViewTemplates(sender_psid, sendText);
                     default: return adminHandler.showAdminMenu(sender_psid, sendText);
                 }
             }
@@ -287,7 +236,7 @@ async function handleMessage(sender_psid, webhook_event) {
                     case 'awaiting_mod_confirmation': return userHandler.handleModConfirmation(sender_psid, lowerCaseText, ADMIN_ID, userLang);
                     case 'awaiting_mod_clarification': return userHandler.handleModClarification(sender_psid, received_text, ADMIN_ID, userLang);
                     case 'awaiting_manual_ref': return userHandler.handleManualReference(sender_psid, received_text, userLang);
-                 case 'awaiting_manual_mod': return userHandler.handleManualModSelection(sender_psid, received_text, ADMIN_ID, userLang);
+                    case 'awaiting_manual_mod': return userHandler.handleManualModSelection(sender_psid, received_text, ADMIN_ID, userLang);
                     case 'awaiting_ref_for_check': return userHandler.processCheckClaims(sender_psid, received_text, userLang);
                     case 'awaiting_ref_for_replacement': return userHandler.processReplacementRequest(sender_psid, received_text, userLang);
                     case 'awaiting_custom_mod_type': return userHandler.handleCustomModType(sender_psid, received_text, userLang);
@@ -316,9 +265,6 @@ async function handleMessage(sender_psid, webhook_event) {
 async function startServer() {
     try {
         await dbManager.setupDatabase();
-        
-        // NEW: Start the background job poller
-        jobPoller.start();
 
         app.get('/', (req, res) => { res.status(200).send('Bot is online and healthy.'); });
         app.get('/webhook', (req, res) => {
