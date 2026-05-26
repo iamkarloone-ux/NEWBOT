@@ -109,17 +109,36 @@ async function processAdminCreate_Step3_CreateJob(sender_psid, text, sendText) {
     const mod = await db.getModById(modId);
     
     if (isNaN(modId) || !mod) {
-        await sendText(sender_psid, "❌ Invalid Mod ID. Please reply with a valid number from the list or type 'Menu' to cancel.");
+        await sendText(sender_psid, "❌ Invalid Mod ID. Please reply with a valid number.");
         return;
     }
-    
+
     try {
         const password = generatePassword();
-        await sendText(sender_psid, `⏳ Contacting CarX Servers to register and inject account instantly...`);
+        await sendText(sender_psid, "⏳ Contacting CarX Servers to register and inject account instantly...");
 
-        // Pull template from database
-        const template = await db.getTemplateByName(mod.template_name || "Set1");
-        if (!template) throw new Error("No profile template found in database. Use Type 20 to capture one first.");
+        // 1. Resolve Template Name
+        let templateName = mod.template_name;
+        if (!templateName) {
+            // Smart Fallback 1: Strip spaces from Mod Name (e.g., 'Set 2' -> 'Set2')
+            templateName = mod.name.replace(/\s+/g, '');
+        }
+
+        let template = await db.getTemplateByName(templateName);
+
+        // Smart Fallback 2: Use the first available saved template in the DB
+        if (!template) {
+            const availableTemplates = await db.getProfileTemplates();
+            if (availableTemplates && availableTemplates.length > 0) {
+                templateName = availableTemplates[0].name;
+                template = await db.getTemplateByName(templateName);
+                console.log(`[API-CREATE] Mod template not found. Falling back to: ${templateName}`);
+            }
+        }
+
+        if (!template) {
+            throw new Error("No profile template found in database. Use Type 20 to capture one first.");
+        }
 
         // Direct API injection
         const result = await carxApi.createAndInject(state.email, password, template);
@@ -129,7 +148,7 @@ async function processAdminCreate_Step3_CreateJob(sender_psid, text, sendText) {
         }
         
     } catch (e) {
-        console.error("Error creating admin job:", e);
+        console.error("Error creating admin account:", e);
         await sendText(sender_psid, `❌ An unexpected error occurred: ${e.message}`);
     } finally {
         stateManager.clearUserState(sender_psid);
