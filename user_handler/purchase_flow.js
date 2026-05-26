@@ -1,9 +1,10 @@
-// user_handler/purchase_flow.js (COMPLETE & FINAL VERSION)
+// user_handler/purchase_flow.js (FULLY AUTOMATED INSTANT DELIVERY VERSION)
 const db = require('../database');
 const stateManager = require('../state_manager');
 const messengerApi = require('../messenger_api');
 const lang = require('../language_manager');
 const manualEntry = require('./manual_entry_flow'); // Critical for AI fallback
+const carxApi = require('../carx_api'); // Direct API Engine
 
 /**
  * Generates a random password for automated account creation.
@@ -95,7 +96,6 @@ async function handleEmailForPurchase(sender_psid, text, userLang = 'en') {
  * Automatically triggers manual entry if the AI fails.
  */
 async function handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang = 'en') {
-    // FIX: Retrieve state correctly using modern spreading to avoid data loss
     const currentState = stateManager.getUserState(sender_psid) || {};
     
     const amountStr = (analysis.extracted_info?.amount || '').replace(/[^0-9.]/g, '');
@@ -112,7 +112,7 @@ async function handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang =
     // AI FAILURE CHECK: If data is missing, go to Manual Entry immediately
     if (isNaN(amount) || !refNumber || !/^\d{13}$/.test(refNumber)) {
         console.warn(`[AI-SCAN-FAILED] Redirecting user ${sender_psid} to manual entry.`);
-        return await manualEntry.startManualEntryFlow(sender_psid, messengerApi.sendText, currentState.imageUrl, userLang);
+        return await manualEntry.startManualEntryFlow(sender_psid, currentState.imageUrl, userLang);
     }
 
     const matchingMods = await db.getModsByPrice(amount);
@@ -127,7 +127,6 @@ async function handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang =
         ];
         
         await messengerApi.sendQuickReplies(sender_psid, confirmationMsg, replies);
-        // FIX: Ensuring email and modId are passed to the confirmation state
         stateManager.setUserState(sender_psid, 'awaiting_mod_confirmation', { 
             refNumber, 
             modId: mod.id, 
@@ -157,7 +156,7 @@ async function handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang =
 
 /**
  * Handles the final 'Yes' confirmation from the user.
- * Creates the automation job for the worker script.
+ * Performs direct, instant account creation and profile cloning.
  */
 async function handleModConfirmation(sender_psid, text, ADMIN_ID, userLang = 'en') {
     const state = stateManager.getUserState(sender_psid);
@@ -173,20 +172,30 @@ async function handleModConfirmation(sender_psid, text, ADMIN_ID, userLang = 'en
             const password = generatePassword();
             const safeEmail = state.email || "No Email Provided"; 
 
-            // SUCCESS: Queue the job and notify the admin
-            const jobId = await db.createAccountCreationJob(sender_psid, safeEmail, password, state.modId);
-            
-            const confirmationMessage = lang.getText('automation_started_user', userLang).replace('{modName}', state.modName);
-            await messengerApi.sendText(sender_psid, confirmationMessage);
-            
-            await messengerApi.sendText(ADMIN_ID, `🤖 Automation job (ID: ${jobId}) queued for ${userName}\nMod: ${state.modName}\nRef: ${state.refNumber}`);
+            const mod = await db.getModById(state.modId);
+            // Fetch the blueprint template from database (Defaulting to 'Set1')
+            const template = await db.getTemplateByName(mod.template_name || "Set1");
+            if (!template) throw new Error("No profile template found in database.");
+
+            // Notify user that the bot is communicating directly with CarX
+            await messengerApi.sendText(sender_psid, "🚀 Connecting to CarX Servers... Creating your account.");
+
+            const result = await carxApi.createAndInject(safeEmail, password, template);
+
+            if (result) {
+                const successMessage = lang.getText('delivery_success', userLang) + 
+                                       `\n\n📧 Username: \`${safeEmail}\`\n🔐 Password: \`${password}\`\n🆔 CarX ID: \`${result.carxId}\`\n\nThank you for your trust! Enjoy! 💙`;
+                await messengerApi.sendText(sender_psid, successMessage);
+                await messengerApi.sendText(ADMIN_ID, `✅ INSTANT DELIVERY: ${userName} bought ${state.modName}. Account: ${safeEmail}`);
+            }
 
         } catch (e) {
             if (e.message === 'Duplicate reference number') {
                 await messengerApi.sendText(sender_psid, lang.getText('error_duplicate_ref', userLang));
             } else { 
                 console.error("Critical Purchase Error:", e);
-                await messengerApi.sendText(sender_psid, lang.getText('error_unexpected_user', userLang));
+                await messengerApi.sendText(sender_psid, "❌ Direct API Injection Failed: " + e.message);
+                await messengerApi.sendText(ADMIN_ID, `🚨 AUTOMATION FAIL: ${state.email} tried to buy but API threw: ${e.message}`);
             }
         }
     } else {
@@ -218,18 +227,27 @@ async function handleModClarification(sender_psid, text, ADMIN_ID, userLang = 'e
         const password = generatePassword();
         const safeEmail = state.email || "No Email Provided";
 
-        const jobId = await db.createAccountCreationJob(sender_psid, safeEmail, password, modId);
-        
-        const confirmationMessage = lang.getText('automation_started_user', userLang).replace('{modName}', mod.name);
-        await messengerApi.sendText(sender_psid, confirmationMessage);
-        
-        await messengerApi.sendText(ADMIN_ID, `🤖 Automation job (ID: ${jobId}) queued for ${userName}\nMod: ${mod.name}\nRef: ${state.refNumber}`);
+        // Fetch the template from the database
+        const template = await db.getTemplateByName(mod.template_name || "Set1");
+        if (!template) throw new Error("No profile template found in database.");
+
+        await messengerApi.sendText(sender_psid, "🚀 Connecting to CarX Servers... Creating your account.");
+
+        const result = await carxApi.createAndInject(safeEmail, password, template);
+
+        if (result) {
+            const successMessage = lang.getText('delivery_success', userLang) + 
+                                   `\n\n📧 Username: \`${safeEmail}\`\n🔐 Password: \`${password}\`\n🆔 CarX ID: \`${result.carxId}\`\n\nThank you for your trust! Enjoy! 💙`;
+            await messengerApi.sendText(sender_psid, successMessage);
+            await messengerApi.sendText(ADMIN_ID, `✅ INSTANT DELIVERY: ${userName} bought ${mod.name}. Account: ${safeEmail}`);
+        }
 
     } catch (e) {
         if (e.message === 'Duplicate reference number') {
             await messengerApi.sendText(sender_psid, lang.getText('error_duplicate_ref', userLang));
         } else { 
-            await messengerApi.sendText(sender_psid, lang.getText('error_unexpected_user', userLang));
+            console.error("Critical Clarification Error:", e);
+            await messengerApi.sendText(sender_psid, "❌ Direct API Injection Failed: " + e.message);
         }
     }
     
