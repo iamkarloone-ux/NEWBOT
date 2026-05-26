@@ -1,12 +1,13 @@
-// user_handler/account_services.js (Fully Automated Version)
+// user_handler/account_services.js (FULLY AUTOMATED INSTANT REPLACEMENT VERSION)
 const db = require('../database');
 const stateManager = require('../state_manager');
 const messengerApi = require('../messenger_api');
 const lang = require('../language_manager');
 const { ADMIN_ID } = require('../secrets');
+const carxApi = require('../carx_api'); // Direct API Engine
 
 /**
- * Password generator for the automated replacement jobs.
+ * Password generator for the automated replacement accounts.
  */
 function generatePassword(length = 10) {
     const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -58,7 +59,7 @@ async function processCheckClaims(sender_psid, refNumber, userLang = 'en') {
 }
 
 
-// --- Replacement Request (FULLY AUTOMATED) ---
+// --- Replacement Request (FULLY AUTOMATED INSTANT REPLACEMENT) ---
 
 /**
  * Prompts the user for a reference number to start a replacement request.
@@ -70,7 +71,7 @@ async function promptForReplacement(sender_psid, userLang = 'en') {
 }
 
 /**
- * Validates the request and starts the automated account creation job for a replacement.
+ * Validates the request and instantly creates + injects a replacement account via API.
  */
 async function processReplacementRequest(sender_psid, refNumber, userLang = 'en') {
     const trimmedRef = refNumber.trim();
@@ -105,36 +106,44 @@ async function processReplacementRequest(sender_psid, refNumber, userLang = 'en'
         return;
     }
 
-    // 2. Start Automation
+    // 2. Direct API Replacement Generation
     try {
-        // Increment used claims immediately to prevent double-requests
-        await db.useClaim(ref.ref_number);
+        await messengerApi.sendText(sender_psid, "🚀 Connecting to CarX Servers... Creating your replacement account instantly.");
+
+        const mod = await db.getModById(ref.mod_id);
+        const template = await db.getTemplateByName(mod.template_name || "Set1");
+        if (!template) throw new Error("No profile template found in database.");
 
         const password = generatePassword();
         const placeholderEmail = `acct-${sender_psid}-${Date.now()}@replacement.bot`;
 
-        // FIXED: Passing userLang as the 5th argument so delivery is in the correct language
-        const jobId = await db.createAccountCreationJob(sender_psid, placeholderEmail, password, ref.mod_id, userLang);
-        
-        // Notify the user
-        await messengerApi.sendText(sender_psid, lang.getText('replace_success_automated', userLang));
-        
-        // Notify the admin
-        let userName = 'A User';
-        try { userName = await messengerApi.getUserProfile(sender_psid); } catch(err) {}
-        
-        await messengerApi.sendText(ADMIN_ID, `🤖 AUTOMATED REPLACEMENT job (ID: ${jobId}) has been queued for ${userName} (Mod: ${ref.mod_name}, Ref: ${ref.ref_number}).`);
+        // Direct API Creation & Injection (The Python cloner logic)
+        const result = await carxApi.createAndInject(placeholderEmail, password, template);
+
+        if (result) {
+            // Increment used claims on success
+            await db.useClaim(ref.ref_number);
+
+            const deliveryMessage = lang.getText('delivery_success', userLang) + 
+                                   `\n\n📧 Username: \`${placeholderEmail}\`\n🔐 Password: \`${password}\`\n🆔 CarX ID: \`${result.carxId}\`\n\nEnjoy the game! 💙`;
+            
+            await messengerApi.sendText(sender_psid, deliveryMessage);
+            
+            let userName = 'A User';
+            try { userName = await messengerApi.getUserProfile(sender_psid); } catch(err) {}
+            await messengerApi.sendText(ADMIN_ID, `🤖 INSTANT REPLACEMENT: Generated account for ${userName}\nMod: ${ref.mod_name}\nRef: ${ref.ref_number}`);
+        }
 
     } catch (e) {
-        console.error("Error during automated replacement job creation:", e);
-        await messengerApi.sendText(sender_psid, lang.getText('error_unexpected_user', userLang));
+        console.error("Error during automated replacement generation:", e);
+        await messengerApi.sendText(sender_psid, "❌ Replacement Failed: " + e.message);
+        await messengerApi.sendText(ADMIN_ID, `🚨 AUTOMATION FAIL (REPLACEMENT): ${sender_psid} tried to get replacement but API threw: ${e.message}`);
     }
 
     // 3. Reset State
     stateManager.clearUserState(sender_psid);
     stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
 }
-
 
 module.exports = {
     promptForCheckClaims,
